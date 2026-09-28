@@ -188,12 +188,24 @@ test("reports a missing Codex as not found, naming the checked paths and the con
 	}
 });
 
-test("rejects a config file with unknown keys", async () => {
+test("reads paths from a config file that earlier versions wrote other settings to", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-config-legacy."));
+	try {
+		const configured = await makeExecutable(path.join(root, "Somewhere/codex"));
+		const configPath = path.join(root, "config.json");
+		await writeFile(configPath, JSON.stringify({ version: 1, permissionMode: "full-permissions", codexPath: configured }));
+		assert.equal(resolveOfficialCodex({ defaultCodexPaths: [], configPath, runSync: signedBy() }), configured);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects a config file whose path is not a string", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "cu-config-invalid."));
 	try {
 		const configPath = path.join(root, "config.json");
-		await writeFile(configPath, JSON.stringify({ codexPath: "/x", extra: true }));
-		assert.throws(() => resolveOfficialCodex({ configPath, runSync: signedBy() }), /may only set "codexPath" and "computerUseAppPath"/);
+		await writeFile(configPath, JSON.stringify({ codexPath: 7 }));
+		assert.throws(() => resolveOfficialCodex({ configPath, runSync: signedBy() }), /must set "codexPath" and "computerUseAppPath", when present, to path strings/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
