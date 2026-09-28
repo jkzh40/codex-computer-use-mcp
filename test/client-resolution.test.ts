@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { resolveOfficialComputerUseClient } from "../src/direct-broker.ts";
+import { resolveOfficialCodex, resolveOfficialComputerUseClient } from "../src/direct-broker.ts";
 
 const CLIENT_RELATIVE_PATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 
@@ -43,7 +43,7 @@ test("fails closed when no supported client path exists", async () => {
 	try {
 		assert.throws(
 			() => resolveOfficialComputerUseClient({ userHome: root, legacyPluginRoot: path.join(root, "legacy"), runSync: signedBy() }),
-			/was not found in a supported location/,
+			/Official Computer Use client was not found\. Checked: .*Then set "computerUseAppPath"/,
 		);
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -105,6 +105,95 @@ test("retains the strict legacy plugin-bundle layout when the current component 
 		const clientPath = await makeClient(appPath);
 		const resolved = resolveOfficialComputerUseClient({ userHome: root, legacyPluginRoot: path.join(root, "legacy"), runSync: signedBy() });
 		assert.deepEqual(resolved, { appPath: realpathSync(appPath), clientPath: realpathSync(clientPath), layout: "legacy-plugin-bundle" });
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("uses a configured Computer Use app instead of the default layouts", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-configured-client."));
+	try {
+		const appPath = path.join(root, "custom", "Codex Computer Use.app");
+		const clientPath = await makeClient(appPath);
+		await makeClient(path.join(root, ".codex", "computer-use", "Codex Computer Use.app"));
+		const configPath = path.join(root, "config.json");
+		await writeFile(configPath, JSON.stringify({ computerUseAppPath: appPath }));
+		const resolved = resolveOfficialComputerUseClient({ userHome: root, legacyPluginRoot: path.join(root, "legacy"), configPath, runSync: signedBy() });
+		assert.deepEqual(resolved, { appPath: realpathSync(appPath), clientPath: realpathSync(clientPath), layout: "configured" });
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+async function makeExecutable(filePath: string): Promise<string> {
+	await mkdir(path.dirname(filePath), { recursive: true });
+	await writeFile(filePath, "signed fixture\n", { mode: 0o700 });
+	return realpathSync(filePath);
+}
+
+test("finds Codex in ChatGPT's current CodexCLI.app layout before the legacy location", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-codex-current."));
+	try {
+		const current = path.join(root, "ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+		const legacy = path.join(root, "ChatGPT.app/Contents/Resources/codex");
+		const expected = await makeExecutable(current);
+		await makeExecutable(legacy);
+		assert.equal(resolveOfficialCodex({ defaultCodexPaths: [current, legacy], runSync: signedBy() }), expected);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("falls back to the legacy Codex location on older ChatGPT builds", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-codex-legacy."));
+	try {
+		const current = path.join(root, "ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+		const expected = await makeExecutable(path.join(root, "ChatGPT.app/Contents/Resources/codex"));
+		assert.equal(resolveOfficialCodex({ defaultCodexPaths: [current, expected], runSync: signedBy() }), expected);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("uses a configured Codex path and still verifies its signature", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-codex-configured."));
+	try {
+		const configured = await makeExecutable(path.join(root, "Somewhere/codex"));
+		const configPath = path.join(root, "config.json");
+		await writeFile(configPath, JSON.stringify({ codexPath: configured }));
+		assert.equal(resolveOfficialCodex({ defaultCodexPaths: [], configPath, runSync: signedBy() }), configured);
+		assert.throws(
+			() => resolveOfficialCodex({ defaultCodexPaths: [], configPath, runSync: signedBy("NOT_OPENAI") }),
+			/not signed by the expected OpenAI team/,
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("reports a missing Codex as not found, naming the checked paths and the config to set", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-codex-missing."));
+	try {
+		const missing = path.join(root, "ChatGPT.app/Contents/Resources/codex");
+		const configPath = path.join(root, "config.json");
+		assert.throws(
+			() => resolveOfficialCodex({ defaultCodexPaths: [missing], configPath, runSync: signedBy() }),
+			(error: Error) => error.message.includes("Codex app-server was not found")
+				&& error.message.includes(missing)
+				&& error.message.includes(`set "codexPath" to its absolute path in ${configPath}`)
+				&& !/Signature verification failed/.test(error.message),
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects a config file with unknown keys", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "cu-config-invalid."));
+	try {
+		const configPath = path.join(root, "config.json");
+		await writeFile(configPath, JSON.stringify({ codexPath: "/x", extra: true }));
+		assert.throws(() => resolveOfficialCodex({ configPath, runSync: signedBy() }), /may only set "codexPath" and "computerUseAppPath"/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

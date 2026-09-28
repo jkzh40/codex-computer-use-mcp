@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,10 @@ import { z } from "zod";
 import type { DirectMethod, DirectToolArguments, JsonObject, JsonValue } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
 
-const CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const DEFAULT_CODEX_PATHS = [
+	"/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+	"/Applications/ChatGPT.app/Contents/Resources/codex",
+];
 const COMPUTER_USE_PLUGIN_ROOT =
 	"/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use";
 const COMPUTER_USE_APP_RELATIVE_PATH = "computer-use/Codex Computer Use.app";
@@ -75,6 +78,8 @@ export interface DirectBrokerOptions {
 	/** Test-only process-enumerator override. */
 	processEnumeratorCommand?: string;
 	onSpawn?: (pid: number) => void;
+	/** Path configuration file; see `readOfficialPathConfig`. */
+	configPath?: string;
 }
 
 class BrokerVerificationError extends Error {
@@ -142,7 +147,41 @@ function verifySignedBinary(binaryPath: string, runSync: RunSync): void {
 export interface OfficialComputerUseClient {
 	clientPath: string;
 	appPath: string;
-	layout: "installed-component" | "legacy-plugin-bundle";
+	layout: "installed-component" | "legacy-plugin-bundle" | "configured";
+}
+
+const pathConfigSchema = z.object({
+	codexPath: z.string().min(1).optional(),
+	computerUseAppPath: z.string().min(1).optional(),
+}).strict();
+
+export type OfficialPathConfig = z.infer<typeof pathConfigSchema>;
+
+export function pathConfigFile(stateRoot: string): string {
+	return path.join(stateRoot, "config.json");
+}
+
+/** Read optional path overrides. A missing file means the default official locations. */
+export function readOfficialPathConfig(configPath: string): OfficialPathConfig {
+	if (!existsSync(configPath)) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(configPath, "utf8"));
+	} catch {
+		throw new BrokerVerificationError(`Computer Use config at ${configPath} is not valid JSON`);
+	}
+	const config = pathConfigSchema.safeParse(parsed);
+	if (!config.success) {
+		throw new BrokerVerificationError(`Computer Use config at ${configPath} may only set "codexPath" and "computerUseAppPath" to path strings`);
+	}
+	return config.data;
+}
+
+function notFoundError(component: string, checked: string[], key: keyof OfficialPathConfig, hint: string, configPath?: string): BrokerVerificationError {
+	const where = configPath ? `in ${configPath}` : "in the Computer Use config.json in the state directory";
+	return new BrokerVerificationError(
+		`${component} was not found. Checked: ${checked.join(", ")}. ${hint} Then set "${key}" to its absolute path ${where}.`,
+	);
 }
 
 interface ResolveOfficialComputerUseClientOptions {
@@ -150,6 +189,9 @@ interface ResolveOfficialComputerUseClientOptions {
 	userHome?: string;
 	/** Test-only legacy root override. */
 	legacyPluginRoot?: string;
+	/** Test-only default Codex locations override. */
+	defaultCodexPaths?: string[];
+	configPath?: string;
 	runSync?: RunSync;
 }
 
@@ -170,9 +212,17 @@ function checkedCandidate(appPath: string, clientPath: string, layout: OfficialC
 	return { appPath: canonicalApp, clientPath: canonicalClient, layout };
 }
 
-/** Resolve only the two reviewed official layouts, preferring ChatGPT's current installed-component contract. */
+/** Resolve the configured client, or else the two reviewed official layouts, preferring ChatGPT's current installed-component contract. */
 export function resolveOfficialComputerUseClient(options: ResolveOfficialComputerUseClientOptions = {}): OfficialComputerUseClient {
 	const runSync = options.runSync ?? productionRunSync;
+	const config = options.configPath ? readOfficialPathConfig(options.configPath) : {};
+	const clientHint = "Find the OpenAI-signed \"Codex Computer Use.app\" installed by ChatGPT.";
+	if (config.computerUseAppPath) {
+		const configuredApp = existsSync(config.computerUseAppPath) ? realpathSync(config.computerUseAppPath) : path.resolve(config.computerUseAppPath);
+		const configured = checkedCandidate(configuredApp, path.join(configuredApp, CLIENT_RELATIVE_PATH), "configured", runSync);
+		if (configured) return configured;
+		throw notFoundError("Official Computer Use client", [path.join(configuredApp, CLIENT_RELATIVE_PATH)], "computerUseAppPath", clientHint, options.configPath);
+	}
 	const userHome = options.userHome ?? os.userInfo().homedir;
 	const canonicalUserHome = existsSync(userHome) ? realpathSync(userHome) : path.resolve(userHome);
 	const currentApp = path.join(canonicalUserHome, ".codex", COMPUTER_USE_APP_RELATIVE_PATH);
@@ -184,14 +234,40 @@ export function resolveOfficialComputerUseClient(options: ResolveOfficialCompute
 	const legacyApp = path.join(canonicalLegacyRoot, "Codex Computer Use.app");
 	const legacy = checkedCandidate(legacyApp, path.join(legacyApp, CLIENT_RELATIVE_PATH), "legacy-plugin-bundle", runSync);
 	if (legacy) return legacy;
-	throw new BrokerVerificationError("Official Computer Use client was not found in a supported location");
+	throw notFoundError(
+		"Official Computer Use client",
+		[path.join(currentApp, CLIENT_RELATIVE_PATH), path.join(legacyApp, CLIENT_RELATIVE_PATH)],
+		"computerUseAppPath",
+		clientHint,
+		options.configPath,
+	);
+}
+
+/** Resolve the configured Codex app-server executable, or else the first default ChatGPT location that exists. */
+export function resolveOfficialCodex(options: ResolveOfficialComputerUseClientOptions = {}): string {
+	const runSync = options.runSync ?? productionRunSync;
+	const config = options.configPath ? readOfficialPathConfig(options.configPath) : {};
+	const candidates = config.codexPath ? [path.resolve(config.codexPath)] : options.defaultCodexPaths ?? DEFAULT_CODEX_PATHS;
+	const found = candidates.find((candidate) => existsSync(candidate));
+	if (!found) {
+		throw notFoundError(
+			"Codex app-server",
+			candidates,
+			"codexPath",
+			"Find the OpenAI-signed \"codex\" executable inside ChatGPT.app.",
+			options.configPath,
+		);
+	}
+	const codexPath = realpathSync(found);
+	verifySignedBinary(codexPath, runSync);
+	return codexPath;
 }
 
 export function verifyOfficialDirectBroker(options: ResolveOfficialComputerUseClientOptions = {}) {
 	const runSync = options.runSync ?? productionRunSync;
-	verifySignedBinary(CODEX_PATH, runSync);
+	const codexPath = resolveOfficialCodex({ ...options, runSync });
 	const client = resolveOfficialComputerUseClient({ ...options, runSync });
-	const version = runSync(CODEX_PATH, ["--version"]);
+	const version = runSync(codexPath, ["--version"]);
 	if (version.status !== 0 || !/^codex-cli\s+\d+\./.test((version.stdout ?? "").trim())) {
 		throw new BrokerVerificationError("Could not verify the app-bundled Codex app-server version");
 	}
@@ -200,7 +276,7 @@ export function verifyOfficialDirectBroker(options: ResolveOfficialComputerUseCl
 	if (build.status !== 0 || !clientBuild) {
 		throw new BrokerVerificationError("Could not verify the official Computer Use client build");
 	}
-	return { brokerVersion: (version.stdout ?? "").trim(), clientBuild, client };
+	return { brokerVersion: (version.stdout ?? "").trim(), clientBuild, client, codexPath };
 }
 
 function buildBrokerEnv(codexHome: string, tempRoot: string): NodeJS.ProcessEnv {
@@ -426,8 +502,8 @@ export async function createOfficialDirectToolSession(
 	options: DirectBrokerOptions = {},
 ): Promise<OfficialDirectToolSession> {
 	const verification = options.skipSignatureVerification
-		? { brokerVersion: "test-app-server", clientBuild: "test-client", client: undefined }
-		: verifyOfficialDirectBroker();
+		? { brokerVersion: "test-app-server", clientBuild: "test-client", client: undefined, codexPath: undefined }
+		: verifyOfficialDirectBroker({ configPath: options.configPath });
 	const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-direct-computer-use."));
 	const codexHome = path.join(tempRoot, "codex-home");
 	const workDir = path.join(tempRoot, "work");
@@ -515,7 +591,8 @@ export async function createOfficialDirectToolSession(
 	};
 
 	try {
-		const command = options.appServerCommand ?? CODEX_PATH;
+		const command = options.appServerCommand ?? verification.codexPath;
+		if (!command) throw new BrokerVerificationError("The Codex app-server was not verified");
 		let commandArgs = options.appServerArgs;
 		if (!commandArgs) {
 			if (!verification.client) throw new BrokerVerificationError("The official Computer Use client was not verified");
