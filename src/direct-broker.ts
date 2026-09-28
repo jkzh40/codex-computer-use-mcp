@@ -153,7 +153,7 @@ export interface OfficialComputerUseClient {
 const pathConfigSchema = z.object({
 	codexPath: z.string().min(1).optional(),
 	computerUseAppPath: z.string().min(1).optional(),
-}).strict();
+});
 
 export type OfficialPathConfig = z.infer<typeof pathConfigSchema>;
 
@@ -172,7 +172,7 @@ export function readOfficialPathConfig(configPath: string): OfficialPathConfig {
 	}
 	const config = pathConfigSchema.safeParse(parsed);
 	if (!config.success) {
-		throw new BrokerVerificationError(`Computer Use config at ${configPath} may only set "codexPath" and "computerUseAppPath" to path strings`);
+		throw new BrokerVerificationError(`Computer Use config at ${configPath} must set "codexPath" and "computerUseAppPath", when present, to path strings`);
 	}
 	return config.data;
 }
