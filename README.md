@@ -8,8 +8,8 @@ OpenAI does not produce or endorse this independent project. It relies on an exp
 
 - macOS with an unlocked user session
 - Node.js 22 or newer
-- the official ChatGPT macOS app at `/Applications/ChatGPT.app`
-- the Computer Use component installed by ChatGPT under `~/.codex/computer-use/`
+- the official ChatGPT macOS app, by default at `/Applications/ChatGPT.app`
+- the Computer Use component installed by ChatGPT, by default under `~/.codex/computer-use/`
 - Pi 0.80.7 or newer when using the Pi integration
 
 macOS Screen Recording, Accessibility and TCC controls still apply.
@@ -83,6 +83,21 @@ The adapter has one mode. Pi exposes the ten official methods through the single
 Production calls require verified OpenAI-signed app-server and Computer Use binaries with Team ID `2DC432GLL2`. The adapter uses an isolated, credential-free app-server context. It rejects any model-turn activity. Calls after `get_app_state` reuse the signed session, preserving element identifiers and official app state.
 
 Audit records contain bounded metadata. They exclude arguments, app content, screenshots, prompts and credentials. MCP and CLI state defaults to `~/.direct-computer-use`. Pi state defaults to `direct-computer-use` under the Pi agent directory. Set `CODEX_COMPUTER_USE_HOME` to override either default.
+
+### Paths
+
+By default the adapter uses the Codex app-server at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, falling back to `/Applications/ChatGPT.app/Contents/Resources/codex` on older ChatGPT builds. It uses the Computer Use app at `~/.codex/computer-use/Codex Computer Use.app`, falling back to the copy bundled in older ChatGPT builds.
+
+When ChatGPT is installed elsewhere or moves these files, set either path in `config.json` in the state directory:
+
+```json
+{
+  "codexPath": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "computerUseAppPath": "/Users/me/.codex/computer-use/Codex Computer Use.app"
+}
+```
+
+The adapter reads this file when it starts each Computer Use session, so changes apply without restarting Pi or the MCP server. Configured binaries must pass the same OpenAI signature and Team ID checks. When a component is missing, the error lists the paths checked and the config file to edit. `/computer-use-status` and `codex-computer-use-mcp --status` show the config path and the current error.
 
 Pi limits returned text to 50KB or 2,000 lines. When text exceeds that limit, the complete text is written to a mode-0600 file in a private directory under `/tmp`. Images are returned directly and are never spilled to disk.
 

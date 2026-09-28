@@ -6,6 +6,7 @@ import { appendAudit, type AuditRecord } from "./audit.ts";
 import {
 	callOfficialDirectTool,
 	DirectBrokerCallError,
+	pathConfigFile,
 	verifyOfficialDirectBroker,
 	type DirectBrokerElicitationRequest,
 	type DirectBrokerElicitationResponse,
@@ -45,7 +46,7 @@ export interface DirectServiceDependencies {
 	callTool?: typeof callOfficialDirectTool;
 }
 
-function defaultStateRoot(): string {
+export function defaultStateRoot(): string {
 	return process.env.CODEX_COMPUTER_USE_HOME || path.join(homedir(), ".direct-computer-use");
 }
 
@@ -109,6 +110,7 @@ export async function executeDirectTool(raw: JsonValue, deps: DirectServiceDepen
 			timeoutMs: 120_000,
 			onElicitation: deps.onElicitation,
 			supportsOpenAiFormElicitation: deps.supportsOpenAiFormElicitation,
+			configPath: pathConfigFile(stateRoot),
 		});
 		brokerCleanupVerified = broker.brokerCleanupVerified;
 		outcome = broker.isError ? "official_error" : "ok";
@@ -154,7 +156,9 @@ export async function executeDirectTool(raw: JsonValue, deps: DirectServiceDepen
 interface DirectStatus extends JsonObject {
 	stateRoot: string;
 	permissionMode: "no-permissions";
+	configPath: string;
 	brokerVerified: boolean;
+	brokerError?: string;
 	brokerVersion?: string;
 	clientBuild?: string;
 	methods: DirectMethod[];
@@ -163,15 +167,18 @@ interface DirectStatus extends JsonObject {
 export function getDirectStatus(stateRoot = defaultStateRoot()): DirectStatus {
 	const status: DirectStatus = {
 		stateRoot,
+		configPath: pathConfigFile(stateRoot),
 		permissionMode: "no-permissions",
 		brokerVerified: false,
 		methods: [...COMPUTER_USE_METHODS],
 	};
 	try {
-		const verification = verifyOfficialDirectBroker();
+		const verification = verifyOfficialDirectBroker({ configPath: status.configPath });
 		status.brokerVerified = true;
 		status.brokerVersion = verification.brokerVersion;
 		status.clientBuild = verification.clientBuild;
-	} catch {}
+	} catch (error) {
+		status.brokerError = error instanceof Error ? error.message : String(error);
+	}
 	return status;
 }
