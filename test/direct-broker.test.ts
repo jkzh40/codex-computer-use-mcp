@@ -248,6 +248,18 @@ test("partial process enumeration errors fail closed but still kill already disc
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("lsof warnings about unrelated unstatable volumes do not fail broker cleanup", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-lsof-warning-test."));
+	try {
+		const { script } = await makeFake(root);
+		const lsof = path.join(root, "lsof.sh");
+		await writeFile(lsof, `#!/bin/sh\nfor arg in "$@"; do [ "$arg" != "-w" ] || exec /usr/sbin/lsof "$@"; done\necho "lsof: WARNING: can't stat() hfs file system /private/var/folders/zz/T/mounted-image" >&2\nexit 1\n`, { mode: 0o700 });
+		const result = await callOfficialDirectTool("list_apps", {}, { ...options(script), cwdEnumeratorCommand: lsof });
+		assert.equal(result.isError, false);
+		assert.equal(result.brokerCleanupVerified, true);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("an app-server that exits immediately cannot orphan a private-workdir child", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-orphan-test."));
 	try {

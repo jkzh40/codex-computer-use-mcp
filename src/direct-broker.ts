@@ -77,6 +77,8 @@ export interface DirectBrokerOptions {
 	skipSignatureVerification?: boolean;
 	/** Test-only process-enumerator override. */
 	processEnumeratorCommand?: string;
+	/** Test-only working-directory enumerator override. */
+	cwdEnumeratorCommand?: string;
 	onSpawn?: (pid: number) => void;
 	/** Path configuration file; see `readOfficialPathConfig`. */
 	configPath?: string;
@@ -380,8 +382,10 @@ function collectDescendants(rootPid: number, processEnumeratorCommand = "/usr/bi
 	return descendants;
 }
 
-function collectProcessesWithCwd(workDir: string): Set<number> {
-	const result = spawnSync("/usr/sbin/lsof", ["-a", "-d", "cwd", "+d", workDir, "-Fp"], {
+function collectProcessesWithCwd(workDir: string, cwdEnumeratorCommand = "/usr/sbin/lsof"): Set<number> {
+	// -w: without it, lsof warns on stderr about any volume it cannot stat, such as a disk image
+	// mounted by root, and the stderr check below would reject a complete enumeration.
+	const result = spawnSync(cwdEnumeratorCommand, ["-w", "-a", "-d", "cwd", "+d", workDir, "-Fp"], {
 		encoding: "utf8",
 		timeout: 3000,
 	});
@@ -406,6 +410,7 @@ async function terminateGroup(
 	proc: ChildProcessWithoutNullStreams | undefined,
 	workDir: string,
 	processEnumeratorCommand = "/usr/bin/pgrep",
+	cwdEnumeratorCommand = "/usr/sbin/lsof",
 ): Promise<void> {
 	const pid = proc?.pid;
 	if (!pid) return;
@@ -423,7 +428,7 @@ async function terminateGroup(
 			cleanupError ??= error instanceof Error ? error : new Error(String(error));
 		}
 		try {
-			for (const owned of collectProcessesWithCwd(workDir)) found.add(owned);
+			for (const owned of collectProcessesWithCwd(workDir, cwdEnumeratorCommand)) found.add(owned);
 		} catch (error) {
 			if (error instanceof ProcessEnumerationError) {
 				for (const owned of error.partialPids) found.add(owned);
@@ -478,7 +483,7 @@ async function terminateGroup(
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 	let cwdSurvivors = new Set<number>();
-	try { cwdSurvivors = collectProcessesWithCwd(workDir); }
+	try { cwdSurvivors = collectProcessesWithCwd(workDir, cwdEnumeratorCommand); }
 	catch (error) { cleanupError ??= error instanceof Error ? error : new Error(String(error)); }
 	for (const survivor of cwdSurvivors) {
 		try { process.kill(survivor, "SIGKILL"); } catch { /* exited */ }
@@ -535,7 +540,7 @@ export async function createOfficialDirectToolSession(
 		pending.clear();
 	};
 	const ensureTerminated = (): Promise<void> => {
-		termination ??= terminateGroup(proc, workDir, options.processEnumeratorCommand);
+		termination ??= terminateGroup(proc, workDir, options.processEnumeratorCommand, options.cwdEnumeratorCommand);
 		return termination;
 	};
 	const fail = (error: Error): void => {
